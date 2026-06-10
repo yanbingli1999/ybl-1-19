@@ -7,12 +7,17 @@ import {
   type DiagnosisResult,
   type ActionType,
   type AccidentType,
+  type BusinessRating,
+  type RatingChange,
   initialEquipment,
   generatePetCase,
   generateInitialCases,
   generateTestCases,
   getDisease,
   getMedicine,
+  calculateBusinessRating,
+  calculateRatingScores,
+  createRatingChange,
 } from '@/data/gameData'
 
 interface GameState {
@@ -27,6 +32,7 @@ interface GameState {
   selectedMedicineId: string | null
   showMedicineSelector: boolean
   pendingAction: 'medicate' | 'inject' | 'feed' | null
+  businessRating: BusinessRating
 
   selectCase: (id: string) => void
   examine: () => void
@@ -43,6 +49,8 @@ interface GameState {
   generateNewCase: () => void
   loadTestCases: () => void
   resetGame: () => void
+  addRatingChange: (change: RatingChange) => void
+  refreshRating: () => void
 }
 
 const initialPlayer: Player = {
@@ -52,6 +60,20 @@ const initialPlayer: Player = {
   cured: 0,
   misdiagnosed: 0,
   totalIncome: 0,
+  totalMedicineCost: 0,
+}
+
+const initialRating: BusinessRating = {
+  stars: 3,
+  score: 70,
+  scores: {
+    cureRate: 70,
+    netIncome: 70,
+    equipmentIntegrity: 100,
+    avgTreatmentCost: 70,
+    accidentCount: 100,
+  },
+  recentChanges: [],
 }
 
 const expPerLevel = 100
@@ -62,6 +84,22 @@ function getCoinsForUrgency(urgency: PetCase['urgency']): number {
     case 'medium': return 50
     case 'high': return 80
   }
+}
+
+function getRewardMultiplier(stars: number): number {
+  if (stars >= 4) return 1.25
+  return 1
+}
+
+function generatePetCaseWithRating(stars: number): PetCase {
+  const baseCase = generatePetCase()
+  if (stars <= 2) {
+    const rand = Math.random()
+    if (rand < 0.5) {
+      return { ...baseCase, urgency: 'high' }
+    }
+  }
+  return baseCase
 }
 
 function getPenaltyForAccident(urgency: PetCase['urgency']): number {
@@ -100,6 +138,20 @@ export const useGameStore = create<GameState>((set, get) => ({
   selectedMedicineId: null,
   showMedicineSelector: false,
   pendingAction: null,
+  businessRating: { ...initialRating, scores: { ...initialRating.scores }, recentChanges: [] },
+
+  addRatingChange: (change: RatingChange) => {
+    const state = get()
+    const recentChanges = [change, ...state.businessRating.recentChanges].slice(0, 5)
+    const newRating = calculateBusinessRating(state.player, state.equipment, recentChanges)
+    set({ businessRating: newRating })
+  },
+
+  refreshRating: () => {
+    const state = get()
+    const newRating = calculateBusinessRating(state.player, state.equipment, state.businessRating.recentChanges)
+    set({ businessRating: newRating })
+  },
 
   selectCase: (id: string) => {
     const state = get()
@@ -214,9 +266,11 @@ export const useGameStore = create<GameState>((set, get) => ({
     else if (actionCorrect && !medicineCorrect) errorType = 'medicine'
 
     const isCorrect = actionCorrect && medicineCorrect
+    const rewardMultiplier = getRewardMultiplier(state.businessRating.stars)
 
     if (isCorrect) {
-      const coinsEarned = getCoinsForUrgency(activeCase.urgency)
+      const baseCoins = getCoinsForUrgency(activeCase.urgency)
+      const coinsEarned = Math.round(baseCoins * rewardMultiplier)
       const expGain = activeCase.urgency === 'high' ? 30 : activeCase.urgency === 'medium' ? 20 : 10
       const netCoins = coinsEarned - medicineCost
       const newExp = state.player.exp + expGain
@@ -228,10 +282,23 @@ export const useGameStore = create<GameState>((set, get) => ({
         c.id === activeCase.id ? { ...c, status: 'cured' as const } : c
       )
 
+      const newPlayer = {
+        ...state.player,
+        coins: state.player.coins + netCoins,
+        level: newLevel,
+        exp: newExpAfterLevel,
+        cured: state.player.cured + 1,
+        totalIncome: state.player.totalIncome + coinsEarned,
+        totalMedicineCost: state.player.totalMedicineCost + medicineCost,
+      }
+
       const itemType = action === 'feed' ? '食物' : action === 'inject' ? '注射剂' : '药品'
       let message = `诊断正确！${activeCase.petName} 的「${disease.name}」已治愈！`
       if (medicineCost > 0) {
         message += `（扣除${itemType}费 ${medicineCost} ⬡）`
+      }
+      if (rewardMultiplier > 1) {
+        message += ` [${Math.round((rewardMultiplier - 1) * 100)}% 奖励加成]`
       }
 
       const result: DiagnosisResult = {
@@ -249,16 +316,30 @@ export const useGameStore = create<GameState>((set, get) => ({
         errorType: null,
       }
 
+      const oldScores = calculateRatingScores(state.player, state.equipment)
+      const newScores = calculateRatingScores(newPlayer, state.equipment)
+
+      const changes: RatingChange[] = []
+      const cureRateDelta = newScores.cureRate - oldScores.cureRate
+      if (cureRateDelta !== 0) {
+        changes.push(createRatingChange('cureRate', cureRateDelta, '成功治愈病例'))
+      }
+      const netIncomeDelta = newScores.netIncome - oldScores.netIncome
+      if (netIncomeDelta !== 0) {
+        changes.push(createRatingChange('netIncome', netIncomeDelta, `净收入 ${netIncomeDelta > 0 ? '增加' : '减少'}`))
+      }
+      const avgCostDelta = newScores.avgTreatmentCost - oldScores.avgTreatmentCost
+      if (avgCostDelta !== 0) {
+        changes.push(createRatingChange('avgTreatmentCost', avgCostDelta, '平均诊疗成本变化'))
+      }
+
+      const recentChanges = [...changes, ...state.businessRating.recentChanges].slice(0, 5)
+      const newRating = calculateBusinessRating(newPlayer, state.equipment, recentChanges)
+
       set({
         cases: updatedCases,
-        player: {
-          ...state.player,
-          coins: state.player.coins + netCoins,
-          level: newLevel,
-          exp: newExpAfterLevel,
-          cured: state.player.cured + 1,
-          totalIncome: state.player.totalIncome + coinsEarned,
-        },
+        player: newPlayer,
+        businessRating: newRating,
         gamePhase: 'result',
         diagnosisResult: result,
         showMedicineSelector: false,
@@ -281,6 +362,13 @@ export const useGameStore = create<GameState>((set, get) => ({
             e.id === damagedEquipId ? { ...e, status: 'damaged' as const } : e
           )
         : state.equipment
+
+      const newPlayer = {
+        ...state.player,
+        coins: Math.max(0, state.player.coins - totalDeduction),
+        misdiagnosed: state.player.misdiagnosed + 1,
+        totalMedicineCost: state.player.totalMedicineCost + medicineCost,
+      }
 
       let message = ''
       const itemType = action === 'feed' ? '食物' : action === 'inject' ? '注射剂' : '药品'
@@ -310,14 +398,33 @@ export const useGameStore = create<GameState>((set, get) => ({
         errorType,
       }
 
+      const oldScores = calculateRatingScores(state.player, state.equipment)
+      const newScores = calculateRatingScores(newPlayer, updatedEquipment)
+
+      const changes: RatingChange[] = []
+      const cureRateDelta = newScores.cureRate - oldScores.cureRate
+      if (cureRateDelta !== 0) {
+        changes.push(createRatingChange('cureRate', cureRateDelta, '误诊导致治愈率下降'))
+      }
+      const accidentDelta = newScores.accidentCount - oldScores.accidentCount
+      if (accidentDelta !== 0) {
+        changes.push(createRatingChange('accidentCount', accidentDelta, '发生医疗事故'))
+      }
+      if (damagedEquipId) {
+        const equipDelta = newScores.equipmentIntegrity - oldScores.equipmentIntegrity
+        if (equipDelta !== 0) {
+          changes.push(createRatingChange('equipmentIntegrity', equipDelta, '设备被损坏'))
+        }
+      }
+
+      const recentChanges = [...changes, ...state.businessRating.recentChanges].slice(0, 5)
+      const newRating = calculateBusinessRating(newPlayer, updatedEquipment, recentChanges)
+
       set({
         cases: updatedCases,
         equipment: updatedEquipment,
-        player: {
-          ...state.player,
-          coins: Math.max(0, state.player.coins - totalDeduction),
-          misdiagnosed: state.player.misdiagnosed + 1,
-        },
+        player: newPlayer,
+        businessRating: newRating,
         gamePhase: 'accident',
         accidentType: disease.accidentType,
         diagnosisResult: result,
@@ -334,14 +441,34 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (!equip || equip.status === 'normal') return
     if (state.player.coins < equip.repairCost) return
 
+    const updatedEquipment = state.equipment.map(e =>
+      e.id === id ? { ...e, status: 'normal' as const } : e
+    )
+    const newPlayer = {
+      ...state.player,
+      coins: state.player.coins - equip.repairCost,
+    }
+
+    const oldScores = calculateRatingScores(state.player, state.equipment)
+    const newScores = calculateRatingScores(newPlayer, updatedEquipment)
+    const equipDelta = newScores.equipmentIntegrity - oldScores.equipmentIntegrity
+
+    const changes: RatingChange[] = []
+    if (equipDelta !== 0) {
+      changes.push(createRatingChange('equipmentIntegrity', equipDelta, `修复了 ${equip.name}`))
+    }
+    const netIncomeDelta = newScores.netIncome - oldScores.netIncome
+    if (netIncomeDelta !== 0) {
+      changes.push(createRatingChange('netIncome', netIncomeDelta, '维修设备支出'))
+    }
+
+    const recentChanges = [...changes, ...state.businessRating.recentChanges].slice(0, 5)
+    const newRating = calculateBusinessRating(newPlayer, updatedEquipment, recentChanges)
+
     set({
-      equipment: state.equipment.map(e =>
-        e.id === id ? { ...e, status: 'normal' as const } : e
-      ),
-      player: {
-        ...state.player,
-        coins: state.player.coins - equip.repairCost,
-      },
+      equipment: updatedEquipment,
+      player: newPlayer,
+      businessRating: newRating,
     })
   },
 
@@ -349,7 +476,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     const state = get()
     const remainingCases = state.cases.filter(c => c.status !== 'cured' && c.status !== 'accident')
     while (remainingCases.length < 4) {
-      remainingCases.push(generatePetCase())
+      remainingCases.push(generatePetCaseWithRating(state.businessRating.stars))
     }
 
     set({
@@ -364,7 +491,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     const state = get()
     const remainingCases = state.cases.filter(c => c.status !== 'cured' && c.status !== 'accident')
     while (remainingCases.length < 4) {
-      remainingCases.push(generatePetCase())
+      remainingCases.push(generatePetCaseWithRating(state.businessRating.stars))
     }
 
     set({
@@ -378,7 +505,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   generateNewCase: () => {
     const state = get()
-    const newCase = generatePetCase()
+    const newCase = generatePetCaseWithRating(state.businessRating.stars)
     set({ cases: [...state.cases, newCase] })
   },
 
@@ -393,6 +520,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       selectedMedicineId: null,
       pendingAction: null,
     })
+    get().refreshRating()
   },
 
   resetGame: () => {
@@ -414,6 +542,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       showMedicineSelector: false,
       selectedMedicineId: null,
       pendingAction: null,
+      businessRating: { ...initialRating, scores: { ...initialRating.scores }, recentChanges: [] },
     })
   },
 }))

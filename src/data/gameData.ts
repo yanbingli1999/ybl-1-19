@@ -56,6 +56,30 @@ export interface Player {
   cured: number
   misdiagnosed: number
   totalIncome: number
+  totalMedicineCost: number
+}
+
+export interface RatingScores {
+  cureRate: number
+  netIncome: number
+  equipmentIntegrity: number
+  avgTreatmentCost: number
+  accidentCount: number
+}
+
+export interface RatingChange {
+  id: string
+  timestamp: number
+  dimension: keyof RatingScores
+  delta: number
+  reason: string
+}
+
+export interface BusinessRating {
+  stars: number
+  score: number
+  scores: RatingScores
+  recentChanges: RatingChange[]
 }
 
 export type ActionType = 'examine' | 'medicate' | 'inject' | 'feed' | 'isolate'
@@ -232,4 +256,114 @@ export function generateTestCases(): PetCase[] {
       examined: false,
     },
   ]
+}
+
+const RATING_WEIGHTS: Record<keyof RatingScores, number> = {
+  cureRate: 0.25,
+  netIncome: 0.2,
+  equipmentIntegrity: 0.2,
+  avgTreatmentCost: 0.15,
+  accidentCount: 0.2,
+}
+
+export function calculateCureRateScore(cured: number, misdiagnosed: number): number {
+  const total = cured + misdiagnosed
+  if (total === 0) return 70
+  const rate = cured / total
+  return Math.round(rate * 100)
+}
+
+export function calculateNetIncomeScore(totalIncome: number, totalMedicineCost: number): number {
+  const netIncome = totalIncome - totalMedicineCost
+  if (netIncome <= 0) return 20
+  if (netIncome >= 1000) return 100
+  return Math.round(20 + (netIncome / 1000) * 80)
+}
+
+export function calculateEquipmentIntegrityScore(equipment: Equipment[]): number {
+  if (equipment.length === 0) return 100
+  const normalCount = equipment.filter(e => e.status === 'normal').length
+  return Math.round((normalCount / equipment.length) * 100)
+}
+
+export function calculateAvgTreatmentCostScore(cured: number, totalMedicineCost: number): number {
+  if (cured === 0) return 70
+  const avgCost = totalMedicineCost / cured
+  if (avgCost <= 10) return 100
+  if (avgCost >= 60) return 30
+  return Math.round(100 - ((avgCost - 10) / 50) * 70)
+}
+
+export function calculateAccidentCountScore(misdiagnosed: number): number {
+  if (misdiagnosed === 0) return 100
+  if (misdiagnosed >= 15) return 20
+  return Math.round(100 - (misdiagnosed / 15) * 80)
+}
+
+export function calculateRatingScores(
+  player: Player,
+  equipment: Equipment[]
+): RatingScores {
+  return {
+    cureRate: calculateCureRateScore(player.cured, player.misdiagnosed),
+    netIncome: calculateNetIncomeScore(player.totalIncome, player.totalMedicineCost),
+    equipmentIntegrity: calculateEquipmentIntegrityScore(equipment),
+    avgTreatmentCost: calculateAvgTreatmentCostScore(player.cured, player.totalMedicineCost),
+    accidentCount: calculateAccidentCountScore(player.misdiagnosed),
+  }
+}
+
+export function calculateOverallScore(scores: RatingScores): number {
+  let total = 0
+  for (const key of Object.keys(scores) as (keyof RatingScores)[]) {
+    total += scores[key] * RATING_WEIGHTS[key]
+  }
+  return Math.round(total)
+}
+
+export function scoreToStars(score: number): number {
+  if (score >= 90) return 5
+  if (score >= 75) return 4
+  if (score >= 55) return 3
+  if (score >= 35) return 2
+  return 1
+}
+
+export function calculateBusinessRating(
+  player: Player,
+  equipment: Equipment[],
+  recentChanges: RatingChange[] = []
+): BusinessRating {
+  const scores = calculateRatingScores(player, equipment)
+  const score = calculateOverallScore(scores)
+  const stars = scoreToStars(score)
+  return { stars, score, scores, recentChanges }
+}
+
+export function getRatingDimensionLabel(dimension: keyof RatingScores): string {
+  const labels: Record<keyof RatingScores, string> = {
+    cureRate: '治愈率',
+    netIncome: '净收入',
+    equipmentIntegrity: '设备完好率',
+    avgTreatmentCost: '平均诊疗成本',
+    accidentCount: '事故次数',
+  }
+  return labels[dimension]
+}
+
+let changeCounter = 0
+
+export function createRatingChange(
+  dimension: keyof RatingScores,
+  delta: number,
+  reason: string
+): RatingChange {
+  changeCounter++
+  return {
+    id: `change_${Date.now()}_${changeCounter}`,
+    timestamp: Date.now(),
+    dimension,
+    delta,
+    reason,
+  }
 }
